@@ -10,32 +10,29 @@ namespace EventStore.Core.Tests.Index.IndexV1
         private static readonly ILogger Log = LogManager.GetLoggerFor<ptable_midpoint_cache_should>();
         protected byte _ptableVersion = PTableVersions.IndexV1;
 
-        [Test, Category("LongRunning"), Ignore("Veerrrryyy long running :)")]
-        public void construct_valid_cache_for_any_combination_of_params()
-        {
+        private void construct_valid_cache_for_any_combination_of_params(int maxIndexEntries){
             var rnd = new Random(123987);
-            for (int count = 0; count < 4096; ++count)
+            for (int count = 0; count < maxIndexEntries; ++count)
             {
-                PTable ptable = null;
-                try
+                for (int depth = 0; depth < 15; ++depth)
                 {
-                    Log.Trace("Creating PTable with count {0}", count);
-                    ptable = ConstructPTable(GetFilePathFor(string.Format("{0}.ptable", count)), count, rnd);
-
-                    for (int depth = 0; depth < 15; ++depth)
+                    PTable ptable = null;
+                    try
                     {
+                        Log.Trace("Creating PTable with count {0}, depth {1}", count, depth);
+                        ptable = ConstructPTable(GetFilePathFor(string.Format("{0}-{1}-indexv{2}.ptable", count, depth,_ptableVersion)), count, rnd,depth);
                         ValidateCache(ptable.GetMidPoints(), count, depth);
                     }
-                }
-                finally
-                {
-                    if (ptable != null)
-                        ptable.MarkForDestruction();
+                    finally
+                    {
+                        if (ptable != null){
+                            ptable.Dispose();
+                        }
+                    }
                 }
             }
         }
-
-        private PTable ConstructPTable(string file, int count, Random rnd)
+        private PTable ConstructPTable(string file, int count, Random rnd, int depth)
         {
             var memTable = new HashListMemTable(_ptableVersion, 20000);
             for (int i = 0; i < count; ++i)
@@ -43,7 +40,7 @@ namespace EventStore.Core.Tests.Index.IndexV1
                 memTable.Add((uint)rnd.Next(), rnd.Next(0, 1<<20), Math.Abs(rnd.Next() * rnd.Next()));
             }
 
-            var ptable = PTable.FromMemtable(memTable, file, 0);
+            var ptable = PTable.FromMemtable(memTable, file, depth);
             return ptable;
         }
 
@@ -59,7 +56,7 @@ namespace EventStore.Core.Tests.Index.IndexV1
             {
                 Assert.IsNotNull(cache);
                 Assert.AreEqual(2, cache.Length);
-                Assert.AreEqual(0, cache[1].ItemIndex);
+                Assert.AreEqual(0, cache[0].ItemIndex);
                 Assert.AreEqual(0, cache[1].ItemIndex);
                 return;
             }
@@ -74,6 +71,18 @@ namespace EventStore.Core.Tests.Index.IndexV1
                 Assert.Less(cache[i-1].ItemIndex, cache[i].ItemIndex);
             }
             Assert.AreEqual(count-1, cache[cache.Length-1].ItemIndex);
+        }
+
+        [Test, Category("LongRunning"), Ignore("Veerrrryyy long running :)")]
+        public void construct_valid_cache_for_any_combination_of_params_large()
+        {
+            construct_valid_cache_for_any_combination_of_params(4096);
+        }
+
+        [Test]
+        public void construct_valid_cache_for_any_combination_of_params_small()
+        {
+            construct_valid_cache_for_any_combination_of_params(20);
         }
     }
 }

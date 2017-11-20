@@ -25,6 +25,7 @@ namespace EventStore.Core.Index
         public const byte IndexV1 = 1;
         public const byte IndexV2 = 2;
         public const byte IndexV3 = 3;
+        public const byte IndexV4 = 4;
     }
 
     public partial class PTable : ISearchTable, IDisposable
@@ -32,9 +33,12 @@ namespace EventStore.Core.Index
         public const int IndexEntryV1Size = sizeof(int) + sizeof(int) + sizeof(long);
         public const int IndexEntryV2Size = sizeof(int) + sizeof(long) + sizeof(long);
         public const int IndexEntryV3Size = sizeof(long) + sizeof(long) + sizeof(long);
+        public const int IndexEntryV4Size = IndexEntryV3Size;
+
         public const int IndexKeyV1Size = sizeof(int) + sizeof(int);
         public const int IndexKeyV2Size = sizeof(int) + sizeof(long);
         public const int IndexKeyV3Size = sizeof(long) + sizeof(long);
+        public const int IndexKeyV4Size = IndexKeyV3Size;
         public const int MD5Size = 16;
         public const int DefaultBufferSize = 8192;
         public const int DefaultSequentialBufferSize = 65536;
@@ -51,6 +55,9 @@ namespace EventStore.Core.Index
         private readonly long _count;
         private readonly long _size;
         private readonly Midpoint[] _midpoints;
+        private readonly uint _midpointsCached = 0;
+        private readonly long _midpointsCacheSize = 0;
+
         private readonly IndexEntryKey _minEntry, _maxEntry;
         private readonly ObjectPool<WorkItem> _workItems;
         private readonly byte _version;
@@ -100,7 +107,8 @@ namespace EventStore.Core.Index
                 var header = PTableHeader.FromStream(readerWorkItem.Stream);
                 if ((header.Version != PTableVersions.IndexV1) &&
                     (header.Version != PTableVersions.IndexV2) &&
-                    (header.Version != PTableVersions.IndexV3))
+                    (header.Version != PTableVersions.IndexV3) &&
+                    (header.Version != PTableVersions.IndexV4))
                     throw new CorruptIndexException(new WrongFileVersionException(_filename, header.Version, Version));
                 _version = header.Version;
 
@@ -119,7 +127,30 @@ namespace EventStore.Core.Index
                     _indexEntrySize = IndexEntryV3Size;
                     _indexKeySize = IndexKeyV3Size;
                 }
-                _count = ((_size - PTableHeader.Size - MD5Size) / _indexEntrySize);
+
+                if (_version >= PTableVersions.IndexV4)
+                {
+                    //read the PTable footer
+                    var previousPosition = readerWorkItem.Stream.Position;
+                    readerWorkItem.Stream.Seek(readerWorkItem.Stream.Length - MD5Size - PTableFooter.GetSize(_version), SeekOrigin.Begin);
+                    var footer = PTableFooter.FromStream(readerWorkItem.Stream);
+                    if (footer.Version != header.Version)
+                        throw new CorruptIndexException(String.Format("PTable header/footer version mismatch: {0}/{1}",header.Version,footer.Version), new InvalidFileException("Invalid PTable file."));
+
+                    if(_version == PTableVersions.IndexV4){
+                        _indexEntrySize = IndexEntryV4Size;
+                        _indexKeySize = IndexKeyV4Size;
+                    }
+                    else
+                        throw new InvalidOperationException("Unknown PTable version: "+_version);
+
+                    _midpointsCached = footer.NumMidpointsCached;
+                    _midpointsCacheSize = _midpointsCached*_indexEntrySize;
+
+                    readerWorkItem.Stream.Seek(previousPosition, SeekOrigin.Begin);
+                }
+
+                _count = ((_size - PTableHeader.Size - _midpointsCacheSize - PTableFooter.GetSize(_version) - MD5Size) / _indexEntrySize);
 
                 if (Count == 0)
                 {
@@ -146,7 +177,7 @@ namespace EventStore.Core.Index
             int calcdepth = 0;
             try
             {
-                calcdepth = GetDepth(_size, depth);
+                calcdepth = GetDepth(_count * _indexEntrySize, depth);
                 _midpoints = CacheMidpointsAndVerifyHash(calcdepth, skipIndexVerify);
             }
             catch (PossibleToHandleOutOfMemoryException)
@@ -156,16 +187,6 @@ namespace EventStore.Core.Index
             }
             Log.Trace("Loading PTable (Version: {0}) '{1}' ({2} entries, cache depth {3}) done in {4}.",
                       _version, Path.GetFileName(Filename), Count, calcdepth, sw.Elapsed);
-        }
-
-        private int GetDepth(long fileSize, int minDepth) {
-            if((2L << 28) * 4096L < fileSize) return 28;
-            for(int i=27;i>minDepth;i--) {
-                if((2L << i) * 4096L < fileSize) {
-                    return i + 1;
-                }
-            }
-            return minDepth;
         }
 
         internal Midpoint[] CacheMidpointsAndVerifyHash(int depth, bool skipIndexVerify)
@@ -203,6 +224,32 @@ namespace EventStore.Core.Index
                             throw new PossibleToHandleOutOfMemoryException("Failed to allocate memory for Midpoint cache.", exc);
                         }
 
+                        if(skipIndexVerify && (_version >= PTableVersions.IndexV4)){
+                            if(_midpointsCached == midpointsCount){
+                                //index verification is disabled and cached midpoints with the same depth requested are available
+                                //so, we can load them directly from the PTable file
+                                Log.Debug("Loading {0} cached midpoints from PTable",_midpointsCached);
+                                long startOffset = stream.Length - MD5Size - PTableFooter.GetSize(_version) - _midpointsCacheSize;
+                                stream.Seek(startOffset,SeekOrigin.Begin);
+                                for(uint k=0;k<_midpointsCached;k++){
+                                    stream.Read(buffer, 0, _indexEntrySize);
+                                    IndexEntryKey key;
+                                    long index;
+                                    if(_version == PTableVersions.IndexV4){
+                                        key = new IndexEntryKey(BitConverter.ToUInt64(buffer, 8), BitConverter.ToInt64(buffer, 0));
+                                        index = BitConverter.ToInt64(buffer,8+8);
+                                    }
+                                    else
+                                        throw new InvalidOperationException("Unknown PTable version: "+_version);
+                                    midpoints[k] = new Midpoint(key, index);
+                                }
+
+                                return midpoints;
+                            }
+                            else
+                                Log.Debug("Skipping loading of cached midpoints from PTable due to count mismatch, cached midpoints: {0} / required midpoints: {1}",_midpointsCached, midpointsCount);
+                        }
+
                         if(!skipIndexVerify){
                             stream.Seek(0, SeekOrigin.Begin);
                             stream.Read(buffer, 0, PTableHeader.Size);
@@ -213,7 +260,7 @@ namespace EventStore.Core.Index
                         var previousKey = new IndexEntryKey(long.MaxValue, long.MaxValue);
                         for (long k = 0; k < midpointsCount; ++k)
                         {
-                            var nextIndex = (long)k * (count - 1) / (midpointsCount - 1);
+                            var nextIndex = GetMidpointIndex(k,count,midpointsCount);
                             if (previousNextIndex != nextIndex) {
                                 if(!skipIndexVerify){
                                     ReadUntilWithMd5(PTableHeader.Size + _indexEntrySize * nextIndex, stream, md5);
@@ -563,7 +610,7 @@ namespace EventStore.Core.Index
 
         private static IndexEntry ReadNextNoSeek(WorkItem workItem, int ptableVersion)
         {
-            long version = ptableVersion == PTableVersions.IndexV3 ? workItem.Reader.ReadInt64() : workItem.Reader.ReadInt32();
+            long version = (ptableVersion >= PTableVersions.IndexV3) ? workItem.Reader.ReadInt64() : workItem.Reader.ReadInt32();
             ulong stream = ptableVersion == PTableVersions.IndexV1 ? workItem.Reader.ReadUInt32() : workItem.Reader.ReadUInt64();
             long position = workItem.Reader.ReadInt64();
             return new IndexEntry(stream, version, position);

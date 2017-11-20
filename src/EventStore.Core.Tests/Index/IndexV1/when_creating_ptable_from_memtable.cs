@@ -48,7 +48,7 @@ namespace EventStore.Core.Tests.Index.IndexV1
         [Test]
         public void the_file_gets_created()
         {
-            var indexEntrySize = PTable.IndexEntryV3Size;
+            var indexEntrySize = PTable.IndexEntryV4Size;
             if (_ptableVersion == PTableVersions.IndexV1)
             {
                 indexEntrySize = PTable.IndexEntryV1Size;
@@ -56,6 +56,10 @@ namespace EventStore.Core.Tests.Index.IndexV1
             else if (_ptableVersion == PTableVersions.IndexV2)
             {
                 indexEntrySize = PTable.IndexEntryV2Size;
+            }
+            else if(_ptableVersion == PTableVersions.IndexV3)
+            {
+                indexEntrySize = PTable.IndexEntryV3Size;
             }
 
             var table = new HashListMemTable(_ptableVersion, maxSize: 10);
@@ -66,7 +70,8 @@ namespace EventStore.Core.Tests.Index.IndexV1
             using (var sstable = PTable.FromMemtable(table, Filename))
             {
                 var fileinfo = new FileInfo(Filename);
-                Assert.AreEqual(PTableHeader.Size + PTable.MD5Size + 4*indexEntrySize, fileinfo.Length);
+                var midpointsCached = PTable.GetRequiredMidpointCountCached(4, _ptableVersion);
+                Assert.AreEqual(PTableHeader.Size + 4*indexEntrySize + midpointsCached*indexEntrySize + PTableFooter.GetSize(_ptableVersion) + PTable.MD5Size, fileinfo.Length);
                 var items = sstable.IterateAllInOrder().ToList();
                 Assert.AreEqual(GetHash(0x010500000000), items[0].Stream);
                 Assert.AreEqual(0x0001, items[0].Version);
