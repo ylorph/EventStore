@@ -679,21 +679,23 @@ namespace EventStore.Core.Tests.Index.IndexV1
         }
 
         [Test]
-        public void no_midpoints_are_cached_in_ptable_footer()
+        public void midpoints_are_cached_in_ptable_footer()
         {
             var numIndexEntries = 7;
+            var requiredMidpoints = PTable.GetRequiredMidpointCountCached(numIndexEntries,PTableVersions.IndexV4);
+
             var newTableFileCopy = GetTempFilePath();
             File.Copy(_newtableFile, newTableFileCopy);
             using (var filestream = File.Open(newTableFileCopy, FileMode.Open, FileAccess.Read))
             {
                 var footerSize = PTableFooter.GetSize(PTableVersions.IndexV4);
-                Assert.AreEqual(filestream.Length, PTableHeader.Size + numIndexEntries * PTable.IndexEntryV4Size + 0 * PTable.IndexEntryV4Size + footerSize + PTable.MD5Size);
-                filestream.Seek(PTableHeader.Size + numIndexEntries * PTable.IndexEntryV4Size + 0 * PTable.IndexEntryV4Size, SeekOrigin.Begin);
+                Assert.AreEqual(filestream.Length, PTableHeader.Size + numIndexEntries * PTable.IndexEntryV4Size + requiredMidpoints * PTable.IndexEntryV4Size + footerSize + PTable.MD5Size);
+                filestream.Seek(PTableHeader.Size + numIndexEntries * PTable.IndexEntryV4Size + requiredMidpoints * PTable.IndexEntryV4Size, SeekOrigin.Begin);
 
                 var ptableFooter = PTableFooter.FromStream(filestream);
                 Assert.AreEqual(FileType.PTableFile,ptableFooter.FileType);
                 Assert.AreEqual(PTableVersions.IndexV4,ptableFooter.Version);
-                Assert.AreEqual(0, ptableFooter.NumMidpointsCached);
+                Assert.AreEqual(requiredMidpoints, ptableFooter.NumMidpointsCached);
             }
         }
 

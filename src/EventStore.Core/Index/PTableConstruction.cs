@@ -61,7 +61,15 @@ namespace EventStore.Core.Index
 
                     //WRITE MIDPOINTS
                     if(table.Version >= PTableVersions.IndexV4){
-                        WriteMidpointsTo(bs,fs,table.Version,indexEntrySize,buffer,dumpedEntryCount,table.Count,requiredMidpointCount,midpoints);
+                        var numIndexEntries = table.Count;
+                        if(dumpedEntryCount!=numIndexEntries){
+                            //if index entries have been removed, compute the midpoints again
+                            numIndexEntries = dumpedEntryCount;
+                            requiredMidpointCount = GetRequiredMidpointCount(numIndexEntries, table.Version, cacheDepth);
+                            midpoints = ComputeMidpoints(bs,fs,table.Version,indexEntrySize,numIndexEntries, requiredMidpointCount,midpoints);
+                        }
+
+                        WriteMidpointsTo(bs,fs,table.Version,indexEntrySize,buffer,dumpedEntryCount,numIndexEntries,requiredMidpointCount,midpoints);
                     }
 
                     bs.Flush();
@@ -151,6 +159,12 @@ namespace EventStore.Core.Index
 
                     //WRITE MIDPOINTS
                     if(version >= PTableVersions.IndexV4){
+                        if(dumpedEntryCount!=numIndexEntries){
+                            //if index entries have been removed, compute the midpoints again
+                            numIndexEntries = dumpedEntryCount;
+                            requiredMidpointCount = GetRequiredMidpointCount(numIndexEntries, version, cacheDepth);
+                            midpoints = ComputeMidpoints(bs,f,version,indexEntrySize,numIndexEntries, requiredMidpointCount,midpoints);
+                        }
                         WriteMidpointsTo(bs,f,version,indexEntrySize,buffer,dumpedEntryCount,numIndexEntries,requiredMidpointCount,midpoints);
                     }
 
@@ -251,6 +265,12 @@ namespace EventStore.Core.Index
 
                     //WRITE MIDPOINTS
                     if(version >= PTableVersions.IndexV4){
+                        if(dumpedEntryCount!=numIndexEntries){
+                            //if index entries have been removed, compute the midpoints again
+                            numIndexEntries = dumpedEntryCount;
+                            requiredMidpointCount = GetRequiredMidpointCount(numIndexEntries, version, cacheDepth);
+                            midpoints = ComputeMidpoints(bs,f,version,indexEntrySize,numIndexEntries, requiredMidpointCount,midpoints);
+                        }
                         WriteMidpointsTo(bs,f,version,indexEntrySize,buffer,dumpedEntryCount,numIndexEntries,requiredMidpointCount,midpoints);
                     }
 
@@ -303,9 +323,44 @@ namespace EventStore.Core.Index
             stream.Write(buffer, 0, indexEntrySize);
         }
 
+        private static List<Midpoint> ComputeMidpoints(BufferedStream bs, FileStream fs, byte version, int indexEntrySize, long numIndexEntries, long requiredMidpointCount,List<Midpoint> midpoints){
+            int indexKeySize;
+            if(version == PTableVersions.IndexV4)
+                indexKeySize = IndexKeyV4Size;
+            else
+                throw new InvalidOperationException("Unknown PTable version: "+version);
+
+            midpoints.Clear();
+            bs.Flush();
+            byte[] buffer = new byte[indexKeySize];
+
+            var previousFileStreamPosition = fs.Position;
+
+            long previousIndex = -1;
+            IndexEntryKey previousKey = new IndexEntryKey(0,0);
+
+            for(int k=0;k<requiredMidpointCount;k++){
+                long index = GetMidpointIndex(k,numIndexEntries,requiredMidpointCount);
+                if(index == previousIndex){
+                    midpoints.Add(new Midpoint(previousKey, previousIndex));
+                }
+                else{
+                    fs.Seek(PTableHeader.Size + index * indexEntrySize, SeekOrigin.Begin);
+                    fs.Read(buffer,0,indexKeySize);
+                    IndexEntryKey key = new IndexEntryKey(BitConverter.ToUInt64(buffer, 8), BitConverter.ToInt64(buffer, 0));
+                    midpoints.Add(new Midpoint(key,index));
+                    previousIndex = index;
+                    previousKey = key;
+                }
+            }
+
+            fs.Seek(previousFileStreamPosition, SeekOrigin.Begin);
+            return midpoints;
+        }
+
         private static void WriteMidpointsTo(BufferedStream bs, FileStream fs, byte version, int indexEntrySize, byte[] buffer, long dumpedEntryCount, long numIndexEntries, long requiredMidpointCount, List<Midpoint> midpoints)
         {
-            //WRITE MIDPOINT ENTRIES IF NO INDEX ENTRIES HAVE BEEN REMOVED
+            //WRITE MIDPOINT ENTRIES
 
             //special case, when there is a single index entry, we need two midpoints
             if(numIndexEntries==1 && midpoints.Count==1){
@@ -313,7 +368,7 @@ namespace EventStore.Core.Index
             }
 
             var midpointsWritten = 0;
-            if(dumpedEntryCount == numIndexEntries && requiredMidpointCount == midpoints.Count){
+            if(dumpedEntryCount == numIndexEntries && requiredMidpointCount == midpoints.Count){ //if these values don't match, something is wrong
                 bs.Flush();
                 fs.SetLength(fs.Position + midpoints.Count * indexEntrySize);
                 foreach(var pt in midpoints){
